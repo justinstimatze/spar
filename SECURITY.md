@@ -12,13 +12,17 @@ If the model's mutation then fails validation, or the diff can't be regenerated,
 
 Your API key is read from the environment, `.env`, or `~/.config/spar/.env` — never logged, and never written into `~/.claude/spar/log.jsonl`.
 
-Live mode makes no network calls of its own. `spar live-hook` and `spar live-reveal` only read and write local state; the reply that plants or discloses a claim comes from whichever Claude session you're already in, not a separate spar-initiated API call.
+Live mode's chat trigger (`spar live-hook`) and commit-narration trigger (`spar live-hook-commit` in its default `narrate` mode) make no network calls of their own — `spar live-reveal` doesn't either. The reply that plants or discloses a claim comes from whichever Claude session you're already in, not a separate spar-initiated API call.
+
+`spar live-hook-commit`'s `notify` mode is the one exception: it runs the same `internal/inject` pipeline `spar review` uses, headlessly, against your staged diff before a commit — same coin flip (`SPAR_INJECT_RATE`), same one-file-at-a-time content sent to the Anthropic API, same fallback-to-clean behavior on any failure. The only difference from `spar review`'s own call is a tighter latency budget (`inject.HookConfig()`: one HTTP attempt, an 8s timeout, no validation retry) so an automatic hook can't hang a commit for minutes. `gate` mode makes no network call at all — it only ever reads your staged diff locally and shows it to you via Claude Code's own permission prompt.
 
 ## What spar keeps locally
 
 Every trial — injected, clean, or fallen-back — writes one line to `~/.claude/spar/log.jsonl`, including the fallback reason when a trial attempted injection but didn't complete. On an API error, that reason can include up to 300 characters of Anthropic's raw error response — never your file content, never your key. Nothing in the log is sent anywhere; it's a local, append-only file you own.
 
-Live mode trials add a few fields to that same log: `session_id`, and — once revealed — `injected_description` (the model's own account of what it planted) and `user_flag_text` (a paraphrase of the behavior grounding the reveal classification). Both are free text the model writes, not spar-generated, and neither leaves your machine — same as everything else in this file.
+Live mode trials add a few fields to that same log: `session_id`, `live_kind` (which trigger flavor produced the trial — empty for narration, `diff-mutation` for `notify`), and — once revealed — `injected_description` (the model's own account of what it planted for `narrate` trials; spar's own exact record for `notify` trials, when the API response actually returned one — falls back to the model's account on the rare empty response, same as `narrate`) and `user_flag_text` (a paraphrase of the behavior grounding the reveal classification). A `notify`-mode trial additionally logs `injected_file`, `injected_severity`, and `diff_hash` — spar's own ground truth from its `internal/inject` call, the same fields `spar review` already logs for its own trials. Everything here stays local — none of it leaves your machine.
+
+`gate` mode writes nothing to `log.jsonl` at all — no trial, no session id, nothing. It's unscored by design (see README's "Live mode" section), so there's genuinely nothing to log.
 
 The planted reply is also a permanent part of your actual Claude Code transcript, the same as any other reply — Claude Code writes it there, not spar. `spar live-hook` opens that transcript file exactly once, read-only, for the reveal-time corroboration check (`internal/transcript`); it never writes to it. Because nothing automatic ever edits that file after the fact, the reveal is instructed to always restate the correct fact plainly, not just name that something was wrong — see "Live mode" in the README for what that instruction requires.
 

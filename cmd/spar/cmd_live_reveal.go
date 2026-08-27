@@ -63,6 +63,7 @@ func cmdLiveReveal(args []string) {
 		Mode:             store.ModeLive,
 		SessionID:        *session,
 		InjectedCategory: pending.Category,
+		LiveKind:         pending.LiveKind,
 	}
 
 	switch *caught {
@@ -88,6 +89,21 @@ func cmdLiveReveal(args []string) {
 			trial.Outcome = store.OutcomeMiss
 		}
 		trial.LiveExchangeVerified = pending.Corroborated
+	}
+
+	// A notify-mode (real diff-mutation) trial already has exact ground
+	// truth from the moment it was planted — spar computed it, not the
+	// model. Prefer it over whatever the model self-reported: File and
+	// Severity have no flag equivalent at all (notify-mode-only axes),
+	// and InjectedDescription is more accurate from spar's own record
+	// than from the model's memory of a diff it merely narrated.
+	if trial.Injected && pending.LiveKind == store.LiveKindDiffMutation {
+		trial.InjectedFile = pending.InjectedFile
+		trial.InjectedSeverity = pending.InjectedSeverity
+		trial.DiffHash = pending.DiffHash
+		if pending.InjectedDescription != "" {
+			trial.InjectedDescription = pending.InjectedDescription
+		}
 	}
 
 	// Only ever trust --original-text for spar live-fixup once it's proven

@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/justinstimatze/spar/internal/store"
 )
 
 func isolateHome(t *testing.T) {
@@ -372,6 +374,92 @@ func TestPruneCooldownsRemovesOnlyOldMarkers(t *testing.T) {
 	}
 	if fire, _ := ShouldFire("fresh-session-0123456789", time.Hour); fire {
 		t.Error("the fresh marker should have survived the prune")
+	}
+}
+
+func TestWritePendingDiffMutationRoundtrip(t *testing.T) {
+	isolateHome(t)
+	gt := DiffMutationGroundTruth{
+		Category:    "off-by-one",
+		File:        "internal/foo/foo.go",
+		Severity:    "medium",
+		Description: "loop bound shifted by one",
+		DiffHash:    "abc123",
+	}
+	p, err := WritePendingDiffMutation(testSession, "/tmp/fake-transcript.jsonl", gt)
+	if err != nil {
+		t.Fatalf("WritePendingDiffMutation: %v", err)
+	}
+	if p.Token == "" {
+		t.Fatal("WritePendingDiffMutation did not generate a token")
+	}
+
+	got, ok, err := ReadPending(testSession)
+	if err != nil {
+		t.Fatalf("ReadPending: %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadPending: expected a pending entry")
+	}
+	if got.LiveKind != store.LiveKindDiffMutation {
+		t.Errorf("LiveKind = %q, want %q", got.LiveKind, store.LiveKindDiffMutation)
+	}
+	if got.Category != gt.Category {
+		t.Errorf("Category = %q, want it to reuse gt.Category (%q)", got.Category, gt.Category)
+	}
+	if got.InjectedFile != gt.File || got.InjectedSeverity != gt.Severity || got.InjectedDescription != gt.Description || got.DiffHash != gt.DiffHash {
+		t.Errorf("ground truth didn't round-trip: got %+v, want it to match %+v", got, gt)
+	}
+	if got.TranscriptPath != "/tmp/fake-transcript.jsonl" {
+		t.Errorf("TranscriptPath = %q, want it to round-trip", got.TranscriptPath)
+	}
+}
+
+func TestWritePendingDiffMutationRejectsDoubleFireAgainstWritePending(t *testing.T) {
+	isolateHome(t)
+	if _, err := WritePending(testSession, "misordered-causality", ""); err != nil {
+		t.Fatalf("WritePending: %v", err)
+	}
+	if _, err := WritePendingDiffMutation(testSession, "", DiffMutationGroundTruth{Category: "off-by-one"}); err == nil {
+		t.Error("WritePendingDiffMutation should fail (O_CREATE|O_EXCL) against an already-pending narrate plant, same as two WritePending calls would")
+	}
+}
+
+// TestReadPendingBackwardCompatWithoutNewFields confirms a pending file
+// written before LiveKind/InjectedFile/InjectedSeverity/
+// InjectedDescription/DiffHash existed still decodes correctly — every
+// new field is omitempty and must come back as its zero value, not break
+// decoding.
+func TestReadPendingBackwardCompatWithoutNewFields(t *testing.T) {
+	isolateHome(t)
+	old := `{"session_id":"` + testSession + `","category":"misordered-causality","token":"abc123","planted_at":"2026-01-01T00:00:00Z","asked":false}`
+	dir, err := pendingDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path, err := pendingPath(testSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadPending(testSession)
+	if err != nil {
+		t.Fatalf("ReadPending: %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadPending: expected a pending entry")
+	}
+	if got.Category != "misordered-causality" || got.Token != "abc123" {
+		t.Errorf("pre-existing fields didn't decode correctly: %+v", got)
+	}
+	if got.LiveKind != "" || got.InjectedFile != "" || got.InjectedSeverity != "" || got.InjectedDescription != "" || got.DiffHash != "" {
+		t.Errorf("new fields should all be zero-valued for a pre-existing pending file, got %+v", got)
 	}
 }
 

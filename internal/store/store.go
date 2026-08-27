@@ -55,6 +55,21 @@ const (
 	ModeLive   = "live"
 )
 
+// LiveKind values distinguish which live-mode trigger flavor produced a
+// Mode==ModeLive trial. The zero value ("") means narration — a
+// fabricated verbal claim the model invented, category drawn from
+// internal/livetaxonomy — for backward compatibility with every live
+// trial logged before notify mode existed. LiveKindDiffMutation means a
+// real internal/inject mutation, category drawn from that package's own,
+// disjoint taxonomy. Needed because under Mode==ModeLive, InjectedCategory
+// can now come from either pool and nothing else disambiguates which —
+// the two pools happen to be disjoint today by inspection only, not by
+// any enforced contract.
+const (
+	LiveKindNarration    = ""
+	LiveKindDiffMutation = "diff-mutation"
+)
+
 // Trial is one spar trial, from either `spar review` (Mode == ModeReview)
 // or live mode (Mode == ModeLive).
 type Trial struct {
@@ -65,13 +80,23 @@ type Trial struct {
 
 	Mode string `json:"mode,omitempty"`
 
+	// LiveKind distinguishes which live-mode trigger flavor produced a
+	// Mode==ModeLive trial (see the LiveKindX constants above) — empty
+	// for every review-mode trial and every live trial logged before
+	// notify mode existed.
+	LiveKind string `json:"live_kind,omitempty"`
+
 	// Injected/InjectedCategory/InjectedDescription are shared by both
 	// modes: "was something injected, and what/where." A live trial
 	// reuses them rather than duplicating storage — InjectedCategory
-	// holds the livetaxonomy category name, InjectedDescription holds
-	// the model's self-reported description of what it planted.
-	// InjectedFile and InjectedSeverity are review-mode-only; a live
-	// trial has no file and no severity axis.
+	// holds a category name from whichever taxonomy LiveKind selects
+	// (internal/livetaxonomy for narration, internal/inject for
+	// diff-mutation), InjectedDescription holds either the model's
+	// self-reported description (narration) or spar's own exact ground
+	// truth (diff-mutation). InjectedFile and InjectedSeverity were
+	// review-mode-only until notify mode started populating them too —
+	// still empty for narration-flavor live trials, which have no real
+	// file or severity axis.
 	Injected            bool   `json:"injected"`
 	InjectedFile        string `json:"injected_file,omitempty"`
 	InjectedCategory    string `json:"injected_category,omitempty"`

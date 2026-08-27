@@ -60,6 +60,53 @@ type Pending struct {
 	// planted — on the same turn as the question, before a real user
 	// answer exists to disclose against.
 	Asked bool `json:"asked"`
+
+	// LiveKind, InjectedFile, InjectedSeverity, InjectedDescription, and
+	// DiffHash are additive and omitempty — set only by
+	// WritePendingDiffMutation (spar live-hook-commit's notify mode),
+	// never by WritePending (narrate mode, or the chat-triggered hook).
+	// A pending file written before these fields existed still decodes
+	// correctly: they simply come back as their zero values. LiveKind
+	// empty means narration, matching store.Mode's existing "" == review
+	// idiom; store.LiveKindDiffMutation is the only other value.
+	//
+	// Unlike Category (reused as-is for both flavors — it already holds
+	// whichever taxonomy's name is relevant), these five carry ground
+	// truth spar itself already knows exactly at plant time for a real
+	// diff mutation, so cmd_live_reveal.go doesn't need to trust the
+	// model's memory of it the way narrate mode's --description flag
+	// does.
+	LiveKind            string `json:"live_kind,omitempty"`
+	InjectedFile        string `json:"injected_file,omitempty"`
+	InjectedSeverity    string `json:"injected_severity,omitempty"`
+	InjectedDescription string `json:"injected_description,omitempty"`
+	DiffHash            string `json:"diff_hash,omitempty"`
+}
+
+// DiffMutationGroundTruth is the real, spar-computed injection result
+// WritePendingDiffMutation stores on a Pending — a struct rather than
+// more positional string args on WritePending, since five same-typed
+// strings stacked on an existing 3-arg call is a real order-of-args risk.
+// Deliberately its own type, not internal/inject.Result reused directly:
+// this package's whole job is local JSON file I/O, and pulling in
+// inject's full API surface (including its network-calling Config type)
+// for five string fields would be real, unwanted coupling growth.
+type DiffMutationGroundTruth struct {
+	// Category is the internal/inject taxonomy name (e.g. "off-by-one")
+	// — a different, disjoint pool from internal/livetaxonomy's narration
+	// categories. Reused as-is for Pending.Category; see the field
+	// comment above.
+	Category string
+	// File is the path of the one mutated candidate.
+	File string
+	// Severity is the model's own rough low/medium/high estimate.
+	Severity string
+	// Description is spar's own exact record of what changed and why —
+	// not the model's self-report, unlike narrate mode's equivalent.
+	Description string
+	// DiffHash identifies the real (unmutated) diff this trial ran
+	// against, matching store.Trial.DiffHash's existing convention.
+	DiffHash string
 }
 
 // sessionIDRe bounds what spar will ever use as a filename component,
@@ -131,7 +178,47 @@ func WritePending(sessionID, category, transcriptPath string) (Pending, error) {
 		return Pending{}, err
 	}
 	p := Pending{SessionID: sessionID, Category: category, Token: token, PlantedAt: time.Now(), TranscriptPath: transcriptPath}
+	return writePending(p)
+}
 
+// WritePendingDiffMutation is WritePending's counterpart for spar
+// live-hook-commit's notify mode: category is reused via the same
+// Pending.Category field narrate mode already uses (it already holds
+// whichever taxonomy's name applies), and gt carries the real,
+// spar-computed ground truth for a genuine inject.Try mutation, stored
+// so cmd_live_reveal.go can auto-fill from it later instead of trusting
+// the model to recall it. Same O_CREATE|O_EXCL atomicity as WritePending
+// — a losing race fails closed, no plant, exactly like WritePending's
+// existing callers already handle.
+func WritePendingDiffMutation(sessionID, transcriptPath string, gt DiffMutationGroundTruth) (Pending, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return Pending{}, err
+	}
+	token, err := newToken()
+	if err != nil {
+		return Pending{}, err
+	}
+	p := Pending{
+		SessionID:           sessionID,
+		Category:            gt.Category,
+		Token:               token,
+		PlantedAt:           time.Now(),
+		TranscriptPath:      transcriptPath,
+		LiveKind:            store.LiveKindDiffMutation,
+		InjectedFile:        gt.File,
+		InjectedSeverity:    gt.Severity,
+		InjectedDescription: gt.Description,
+		DiffHash:            gt.DiffHash,
+	}
+	return writePending(p)
+}
+
+// writePending is the shared O_CREATE|O_EXCL atomic write both
+// WritePending and WritePendingDiffMutation use — a double-fire race
+// (two hook invocations somehow overlapping for the same session) can't
+// silently overwrite an in-flight plant's token, regardless of which
+// constructor lost the race.
+func writePending(p Pending) (Pending, error) {
 	dir, err := pendingDir()
 	if err != nil {
 		return Pending{}, err
@@ -139,7 +226,7 @@ func WritePending(sessionID, category, transcriptPath string) (Pending, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return Pending{}, err
 	}
-	path, err := pendingPath(sessionID)
+	path, err := pendingPath(p.SessionID)
 	if err != nil {
 		return Pending{}, err
 	}

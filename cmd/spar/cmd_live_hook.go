@@ -326,7 +326,7 @@ func logExpired(ttl time.Duration) {
 		return
 	}
 	for _, p := range expired {
-		store.Append(path, store.Trial{
+		trial := store.Trial{
 			TS:               time.Now(),
 			Project:          store.ResolveProjectName(mustGetwd()),
 			Mode:             store.ModeLive,
@@ -334,7 +334,21 @@ func logExpired(ttl time.Duration) {
 			Injected:         true,
 			InjectedCategory: p.Category,
 			Outcome:          store.OutcomeUnrevealed,
-		})
+			LiveKind:         p.LiveKind,
+		}
+		// A notify-mode plant already carries spar's own exact ground
+		// truth at expiry — the only point it can ever be recorded, since
+		// the pending file (the sole copy) is about to be deleted. Losing
+		// it here would be permanent, unlike cmd_live_reveal.go's
+		// auto-fill, which has the same data available from a live reveal
+		// instead.
+		if p.LiveKind == store.LiveKindDiffMutation {
+			trial.InjectedFile = p.InjectedFile
+			trial.InjectedSeverity = p.InjectedSeverity
+			trial.DiffHash = p.DiffHash
+			trial.InjectedDescription = p.InjectedDescription
+		}
+		store.Append(path, trial)
 	}
 }
 

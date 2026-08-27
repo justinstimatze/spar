@@ -3,17 +3,20 @@ package inject
 import (
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/justinstimatze/spar/internal/gitdiff"
 )
 
 func testConfig() Config {
 	return Config{
-		APIKey:          "unused-in-these-tests",
-		Model:           "claude-sonnet-5",
-		MaxFileLines:    1500,
-		MaxFileBytes:    60_000,
-		MaxMutatedLines: 5,
+		APIKey:                "unused-in-these-tests",
+		Model:                 "claude-sonnet-5",
+		MaxFileLines:          1500,
+		MaxFileBytes:          60_000,
+		MaxMutatedLines:       5,
+		MaxHTTPAttempts:       3,
+		MaxValidationAttempts: 2,
 	}
 }
 
@@ -162,6 +165,32 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.HTTPTimeout <= 0 {
 		t.Errorf("HTTPTimeout = %v, want a positive timeout", cfg.HTTPTimeout)
+	}
+	// Locked: spar review's worst-case latency must not silently change.
+	// If this ever needs to change, HookConfig's own bounded numbers below
+	// must be reconsidered too, since HookConfig starts from DefaultConfig.
+	if cfg.MaxHTTPAttempts != 3 {
+		t.Errorf("MaxHTTPAttempts = %d, want 3 (today's unchanged value)", cfg.MaxHTTPAttempts)
+	}
+	if cfg.MaxValidationAttempts != 2 {
+		t.Errorf("MaxValidationAttempts = %d, want 2 (today's unchanged value)", cfg.MaxValidationAttempts)
+	}
+}
+
+func TestHookConfigIsBounded(t *testing.T) {
+	cfg := HookConfig()
+	if cfg.MaxHTTPAttempts != 1 {
+		t.Errorf("HookConfig().MaxHTTPAttempts = %d, want 1", cfg.MaxHTTPAttempts)
+	}
+	if cfg.MaxValidationAttempts != 1 {
+		t.Errorf("HookConfig().MaxValidationAttempts = %d, want 1", cfg.MaxValidationAttempts)
+	}
+	if cfg.HTTPTimeout != 8*time.Second {
+		t.Errorf("HookConfig().HTTPTimeout = %v, want 8s", cfg.HTTPTimeout)
+	}
+	// Everything else should still come from DefaultConfig unchanged.
+	if cfg.Model != "claude-sonnet-5" || cfg.MaxFileLines != 1500 || cfg.MaxFileBytes != 60_000 || cfg.MaxMutatedLines != 5 {
+		t.Errorf("HookConfig() diverged from DefaultConfig() outside the three bounded fields: %+v", cfg)
 	}
 }
 

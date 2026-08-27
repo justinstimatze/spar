@@ -159,7 +159,10 @@ func callAPI(cfg Config, path, before, after, hunkContext, category, kind string
 	}
 
 	client := &http.Client{Timeout: cfg.HTTPTimeout}
-	const maxAttempts = 3
+	maxAttempts := cfg.MaxHTTPAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
 	var lastReason string
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {

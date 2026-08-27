@@ -3,6 +3,9 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/justinstimatze/spar/internal/livestate"
+	"github.com/justinstimatze/spar/internal/store"
 )
 
 func TestEnvBool(t *testing.T) {
@@ -37,6 +40,46 @@ func TestEnvRevealMode(t *testing.T) {
 		if got := envRevealMode(); got != want {
 			t.Errorf("envRevealMode() with SPAR_LIVE_REVEAL_MODE=%q = %q, want %q", v, got, want)
 		}
+	}
+}
+
+// TestLogExpiredPropagatesDiffMutationGroundTruth is a regression test for
+// a review finding: an expired notify-mode (diff-mutation) plant's ground
+// truth was silently dropped when logExpired logged its OutcomeUnrevealed
+// trial — the one point that ground truth can never be recovered, since
+// the pending file (its only copy) is deleted by the sweep.
+func TestLogExpiredPropagatesDiffMutationGroundTruth(t *testing.T) {
+	isolateHome(t)
+	const session = "test-session-0123456789"
+	gt := livestate.DiffMutationGroundTruth{
+		Category:    "off-by-one",
+		File:        "internal/foo/foo.go",
+		Severity:    "medium",
+		Description: "loop bound shifted by one",
+		DiffHash:    "abc123",
+	}
+	if _, err := livestate.WritePendingDiffMutation(session, "", gt); err != nil {
+		t.Fatalf("WritePendingDiffMutation: %v", err)
+	}
+
+	// A near-zero TTL means the plant is already "expired" the instant
+	// it's written, without needing to hand-edit the pending file's
+	// PlantedAt on disk.
+	logExpired(1 * time.Nanosecond)
+
+	trials := readLoggedTrials(t)
+	if len(trials) != 1 {
+		t.Fatalf("got %d logged trials, want 1", len(trials))
+	}
+	tr := trials[0]
+	if tr.Outcome != store.OutcomeUnrevealed {
+		t.Fatalf("Outcome = %q, want %q", tr.Outcome, store.OutcomeUnrevealed)
+	}
+	if tr.LiveKind != store.LiveKindDiffMutation {
+		t.Errorf("LiveKind = %q, want %q", tr.LiveKind, store.LiveKindDiffMutation)
+	}
+	if tr.InjectedFile != gt.File || tr.InjectedSeverity != gt.Severity || tr.InjectedDescription != gt.Description || tr.DiffHash != gt.DiffHash {
+		t.Errorf("ground truth was not propagated into the unrevealed trial: %+v", tr)
 	}
 }
 

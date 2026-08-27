@@ -107,9 +107,10 @@ Usage:
                                  README's "Live mode" section for what it
                                  does and how to enable it.
   spar live-hook-commit         PreToolUse hook entrypoint for live mode's
-                                 commit-narration trigger — not meant to be
-                                 run by hand. See README's "Live mode"
-                                 section.
+                                 commit-time trigger — narrate (default),
+                                 notify, or gate, via SPAR_LIVE_COMMIT_MODE.
+                                 Not meant to be run by hand. See README's
+                                 "Live mode" section.
   spar live-reveal --session ID --token TOK --caught yes|no|partial|unengaged|not_planted
                                  Closes out a live-mode pending plant. Called
                                  by the model, not typically by hand.

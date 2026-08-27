@@ -27,20 +27,61 @@ type Config struct {
 	MaxFileBytes    int
 	MaxMutatedLines int
 	HTTPTimeout     time.Duration
+
+	// MaxHTTPAttempts bounds callAPI's own transient-failure retry loop
+	// (429/529/5xx, with backoff); MaxValidationAttempts bounds Try's
+	// outer retry-on-validation-failure loop (same candidate, fresh API
+	// call). Both default to today's hardcoded behavior via
+	// DefaultConfig; HookConfig sets both to 1 so a PreToolUse hook's
+	// worst case stays bounded in seconds, not minutes. A value <= 0 is
+	// treated as 1 by both call sites — never zero attempts.
+	MaxHTTPAttempts       int
+	MaxValidationAttempts int
 }
 
 // DefaultConfig loads the API key via loadAPIKey's env/.env-walk-up/
 // global-config fallback (see api.go) and sets conservative size/scope
-// caps.
+// caps. Matches spar review's behavior exactly as it was before
+// MaxHTTPAttempts/MaxValidationAttempts existed — this is a pure refactor
+// of previously-hardcoded literals (3 HTTP attempts, 2 validation
+// attempts), not a behavior change.
 func DefaultConfig() Config {
 	return Config{
-		APIKey:          loadAPIKey(),
-		Model:           "claude-sonnet-5",
-		MaxFileLines:    1500,
-		MaxFileBytes:    60_000,
-		MaxMutatedLines: 5,
-		HTTPTimeout:     45 * time.Second,
+		APIKey:                loadAPIKey(),
+		Model:                 "claude-sonnet-5",
+		MaxFileLines:          1500,
+		MaxFileBytes:          60_000,
+		MaxMutatedLines:       5,
+		HTTPTimeout:           45 * time.Second,
+		MaxHTTPAttempts:       3,
+		MaxValidationAttempts: 2,
 	}
+}
+
+// HookConfig is DefaultConfig with a bounded worst-case latency, for the
+// one call site (spar live-hook-commit's notify mode) that runs inside a
+// synchronous PreToolUse hook rather than a human patiently waiting at a
+// terminal. One HTTP attempt, no validation retry, an 8s per-attempt
+// timeout: the network portion of a trial is bounded to that one call.
+// This does NOT bound the git subprocess calls Try also makes (file
+// content reads, diff regeneration) — those have no timeout of their
+// own, same as spar review's identical calls today. In the ordinary case
+// they're fast (well under a second), so the realistic total stays
+// comfortably under 10s, but a genuinely stuck git (e.g. index lock
+// contention) isn't covered by this bound — and if git were that stuck,
+// the `git commit` this hook fires ahead of would already be stalled for
+// the same reason, independent of anything spar does. The corresponding
+// hook timeout in .claude/settings.local.json must stay comfortably
+// above the realistic ceiling — see README's "notify mode" section for
+// the paired numbers; the two must change together; a real trial
+// engagement can still take an interactive turn to display and be
+// reacted to.
+func HookConfig() Config {
+	cfg := DefaultConfig()
+	cfg.HTTPTimeout = 8 * time.Second
+	cfg.MaxHTTPAttempts = 1
+	cfg.MaxValidationAttempts = 1
+	return cfg
 }
 
 // RateFromEnv reads SPAR_INJECT_RATE (default 0.4), clamped to [0,1].
@@ -71,6 +112,14 @@ type Result struct {
 	Category    string
 	Description string
 	Severity    string
+
+	// MutatedFileDiff is the single-file diff for the injected candidate
+	// alone (before DisplayDiff splices it back into the full multi-file
+	// diff) — set only when Injected. This is what spar live-hook-commit's
+	// notify mode quotes into the model's narration instructions; nothing
+	// in spar review reads it, since DisplayDiff already carries the
+	// spliced result review mode renders.
+	MutatedFileDiff string
 
 	FallbackReason string
 }
@@ -164,9 +213,13 @@ func Try(d gitdiff.Diff, repoRoot string, cfg Config, rng *rand.Rand) Result {
 	// same candidate is cheap and often enough; callAPI already retries
 	// its own transient failures, so an API error here isn't retried
 	// again — only a validation rejection is.
+	maxValidationAttempts := cfg.MaxValidationAttempts
+	if maxValidationAttempts <= 0 {
+		maxValidationAttempts = 1
+	}
 	var mr mutateResult
 	valid := false
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < maxValidationAttempts; attempt++ {
 		mr, err = callAPI(cfg, fc.Path, before, after, hunkContextText(fc.HunkRanges), category, kind)
 		if err != nil {
 			return clean(d, "api error: "+err.Error())
@@ -191,12 +244,13 @@ func Try(d gitdiff.Diff, repoRoot string, cfg Config, rng *rand.Rand) Result {
 	}
 
 	return Result{
-		Injected:    true,
-		DisplayDiff: spliced,
-		File:        fc.Path,
-		Category:    mr.Category,
-		Description: mr.Description,
-		Severity:    mr.Severity,
+		Injected:        true,
+		DisplayDiff:     spliced,
+		File:            fc.Path,
+		Category:        mr.Category,
+		Description:     mr.Description,
+		Severity:        mr.Severity,
+		MutatedFileDiff: fileDiff,
 	}
 }
 

@@ -88,8 +88,9 @@ machine.
 per-invocation by `--rate`. Default `0.4`.
 
 `SPAR_LIVE_ENABLED`, `SPAR_LIVE_COOLDOWN`, `SPAR_LIVE_PENDING_TTL`,
-`SPAR_LIVE_REVEAL_MODE`, `SPAR_LIVE_STATS_INTERVAL` — live mode's own env
-vars; see "Live mode" below for what each does and their defaults.
+`SPAR_LIVE_REVEAL_MODE`, `SPAR_LIVE_STATS_INTERVAL`, `SPAR_LIVE_COMMIT_MODE`
+— live mode's own env vars; see "Live mode" below for what each does and
+their defaults.
 
 ## Safety invariant
 
@@ -186,43 +187,136 @@ Waiting out the cooldown to see it fire is slow. `spar live-induce` forces
 the very next prompt to plant, cooldown ignored, for testing — no effect if
 a plant is already pending reveal for the session that prompts next.
 
-### Narrating a commit: `spar live-hook-commit`
+### A commit-time trigger: `spar live-hook-commit`
 
-`spar review` needs you to remember to run it. `spar live-hook-commit` is
-the same idea as the hook above, but triggered by a `git commit` instead of
-a chat turn: when Claude is about to commit, it plants one subtly wrong
-fact into how it narrates that commit afterward — never touching the
-commit's actual content, only the description of it. Enable it alongside
-`spar live-hook` with a second block in the same `settings.local.json`:
+`spar review` needs you to remember to run it. `spar live-hook-commit`
+fires on a `git commit` instead of a chat turn, and behaves one of three
+ways depending on `SPAR_LIVE_COMMIT_MODE` (`narrate` | `notify` | `gate`,
+default `narrate`). Enable it alongside `spar live-hook` with a second
+block in the same `settings.local.json`:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       { "matcher": "Bash", "hooks": [
-        { "type": "command", "command": "spar live-hook-commit", "timeout": 10, "if": "Bash(git commit *)" }
+        { "type": "command", "command": "spar live-hook-commit", "timeout": 15, "if": "Bash(git commit *)" }
       ] }
     ]
   }
 }
 ```
 
-It shares `spar live-hook`'s cooldown and pending-plant slot — one plant in
-flight per session, regardless of which trigger caused it — and reveals
-through the exact same `spar live-reveal` flow. `spar live-induce` only
-forces the chat trigger; it has no effect on this one, deliberately —
-forcing a plant on your very next commit would test something you didn't
-ask it to.
-
 The `if` filter is best-effort text matching, not a real shell parse: `git
 -C ../other commit` won't match (a known, accepted gap — not fixed, since a
 broader pattern risks false positives), and a Bash command containing
 `$()`, a backtick, or a `$VAR` reference can match even when it isn't a
-commit at all — a documented Claude Code behavior, not a bug in spar. `spar
-live-hook-commit` guards against that itself before planting anything, and
-the model is separately instructed to check the tool result and plant
-nothing if the commit failed or the matched command wasn't really a
-commit.
+commit at all — a documented Claude Code behavior, not a bug in spar.
+`narrate` and `notify` both guard against that themselves before planting
+anything, and the model is separately instructed to check the tool result
+and plant nothing if the commit failed or the matched command wasn't
+really a commit; `gate` mode has no such escape hatch (see below).
+
+#### `narrate` (default)
+
+When Claude is about to commit, it plants one subtly wrong fact into how
+it narrates that commit afterward — never touching the commit's actual
+content, only the description of it. This is the original commit trigger,
+unchanged. It shares `spar live-hook`'s cooldown and pending-plant slot —
+one plant in flight per session, regardless of which trigger caused it —
+and reveals through the exact same `spar live-reveal` flow. `spar
+live-induce` only forces the chat trigger; it has no effect on this one,
+or on `notify` below, deliberately — forcing a plant on your very next
+commit would test something you didn't ask it to.
+
+#### `notify`
+
+The same idea, but with a *real* mutation instead of a fabricated claim:
+spar runs its own `internal/inject` pipeline headlessly against the
+staged diff — the same mechanism `spar review` uses by hand — and, if it
+injects, tells the model to narrate the commit from that mutated diff
+instead of the real one. Everything else matches `narrate` exactly: same
+cooldown and pending-plant slot, same silent reveal, same `spar
+live-reveal` logging, and the commit itself is never touched — only the
+narration is ever wrong.
+
+The one real difference is latency: `spar review`'s own injection pipeline
+can take up to several minutes in the worst case (retries, backoff), fine
+for a human waiting at a terminal but not for an automatic hook. `notify`
+mode uses a bounded configuration instead — one HTTP attempt, an 8s
+timeout, no validation retry — so the network portion of a trial is
+bounded to that one call. That doesn't cover the git subprocess calls the
+same trial also makes (reading file content, regenerating a diff) — those
+have no timeout of their own, same as `spar review`'s identical calls
+today. In the ordinary case they're fast, so the realistic total stays
+comfortably under 10s, but a genuinely stuck git (index lock contention,
+say) isn't covered — and if git were that stuck, the `git commit` this
+hook fires ahead of would already be stalled for the same reason,
+independent of anything spar does. That's why the `timeout` in the JSON
+above is `15`, not the `10` a narrate-only setup needs — `notify`'s
+network bound and the hook's configured timeout have to move together;
+raising one without the other reopens the hang this bound exists to
+prevent for the part it actually covers.
+
+Two accepted gaps, shared with `gate` below since both capture the diff
+the same way: neither is scoped to a specific pathspec, so `git commit --
+fileA.go` while `fileB.go` is also staged still shows/mutates from the
+full staged diff, not just `fileA.go` — the same best-effort-matching
+spirit as the `if`-filter gap above, not worth a real pathspec parse of
+the Bash command for. And the diff is captured before the real commit
+runs, so a native git hook that reformats staged content as part of the
+commit itself (a lint-staged/husky-style setup) can make what actually
+lands diverge from what spar captured and hashed — an inherent property
+of firing before the tool runs, not something either mode can see ahead
+of time. One `notify`-specific cost: cooldown clears a session to plant
+before the ~8s API call, not after (`MarkFired` only stamps once it
+returns) — two `git commit`s for the same session within that window can
+both pass the gate and both make a real, paid call; only the winner of
+the underlying `O_CREATE|O_EXCL` write keeps its plant, and the loser's
+completed call is silently discarded. Rare, and the identical race
+already exists for `narrate` (where the loser wastes nothing, since
+narrate never touches the network) — worth naming since notify raises the
+cost of losing it, not worth a structural fix for how uncommon two
+same-session commits within 8s of each other actually is.
+
+#### `gate`
+
+A pure friction checkpoint, and deliberately the odd one out: no
+narration, no mutation, no scoring, and — unlike every other spar
+mechanism — no `internal/livestate` involvement at all. No pending file,
+no cooldown marker, nothing logged to `~/.claude/spar/log.jsonl`. It can
+fire on the same commit as an unrelated, separately-pending `narrate` or
+`notify` plant without conflict, because it never touches the state those
+two share.
+
+**`gate` does not require `SPAR_LIVE_ENABLED`**, unlike everything else in
+this section — it never deceives, so it isn't part of live mode's on/off
+switch at all. If the hook is registered with `SPAR_LIVE_COMMIT_MODE=gate`
+in your `settings.local.json`, it fires on every matching commit whether
+or not `SPAR_LIVE_ENABLED` is set. `narrate` and `notify` both still need
+it, exactly as before.
+
+Concretely: spar shows you the real, unmutated diff you're about to
+commit and asks you to approve or deny before the commit lands, via
+Claude Code's own permission prompt (`permissionDecision: "ask"`).
+Approving commits it exactly as staged; denying stops it.
+
+`gate` never injects a mutated diff, on purpose. `permissionDecision:
+"ask"` is a one-shot dialog — the hook process exits before you answer,
+so there's no way to show a diff blind and reveal ground truth after the
+fact, the way `spar review` and live mode's reveal both do. Every other
+spar mechanism always eventually discloses what it did; an injected but
+never-revealed `gate` diff would be the one place that permanently
+deceives without disclosure, even though the real commit stays safe
+regardless. So `gate` trades that away: it's a forced look, not a
+vigilance test, and it's exempt from your catch rate entirely.
+
+Two accepted gaps, same spirit as the `if`-filter caveat above: the diff
+`gate` shows comes from the same staged-first-else-unstaged capture
+`spar review` uses, which doesn't perfectly represent `git commit -a`'s
+on-the-fly staging of tracked files; and `gate` can't reuse `narrate`/
+`notify`'s "check the tool result first" escape hatch, since its decision
+is final before the commit ever runs.
 
 ### Patching the transcript itself: `spar live-fixup`
 
@@ -273,10 +367,14 @@ which surface gets an injected error, not the incentive model.
 No live-embedded hook **in review mode** — `spar review` is still a manual
 command run against `git diff`, invoked by hand each time, never intercepting
 a real commit or watching a session as it happens. Live mode (above) is the
-one exception, opt-in per project — it plants into a chat reply, and, via
-`spar live-hook-commit`, into how a commit gets narrated. Neither ever
-touches what actually lands in your repo; "intercept" here means "observe
-and comment on," not "gate or alter."
+one exception, opt-in per project — `narrate` and `notify` plant into a
+chat reply (a chat turn's, or, via `spar live-hook-commit`, a commit's
+narration); `gate` doesn't plant anything at all, and unlike the other two
+it genuinely can block a commit via Claude Code's own approve/deny
+prompt — a real exception to "observe and comment on, never gate." None of
+the three ever *alters* what lands in your repo: `narrate` and `notify`
+only ever shape what gets said about a commit, and `gate`'s approve/deny
+only ever decides whether the real, untouched commit proceeds.
 
 ## Prior art
 
