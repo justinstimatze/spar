@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.2.0] — 2026-08-27 — live mode's commit-time triggers
 
 - Added live mode: `spar live-hook`, a UserPromptSubmit hook that plants one conceptual/architectural/procedural error directly into a real chat reply, plus `spar live-reveal` to close out the trial once the model asks the user whether they caught it. Off by default (`SPAR_LIVE_ENABLED`), opt-in per project via `.claude/settings.local.json`, never sandboxed the way `spar review` is — a planted claim lives in a real conversation before it's caught. See README's "Live mode" section.
 - Added `spar live-induce`: a one-shot marker that forces the next `spar live-hook` invocation to plant regardless of cooldown, for testing and dogfooding live mode without waiting out `SPAR_LIVE_COOLDOWN`. No effect on a session with a plant already pending reveal.
